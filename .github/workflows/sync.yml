@@ -20,10 +20,10 @@ jobs:
       has_update: ${{ steps.detect.outputs.has_update }}
     steps:
       - name: Checkout
-        uses: actions/checkout@v4
+        uses: actions/checkout@v6
 
       - name: Setup Node.js
-        uses: actions/setup-node@v4
+        uses: actions/setup-node@v6
         with:
           node-version: ${{ env.NODE_VERSION }}
           cache: npm
@@ -62,10 +62,10 @@ jobs:
         arch: [x64, arm64]
     steps:
       - name: Checkout
-        uses: actions/checkout@v4
+        uses: actions/checkout@v6
 
       - name: Setup Node.js
-        uses: actions/setup-node@v4
+        uses: actions/setup-node@v6
         with:
           node-version: ${{ env.NODE_VERSION }}
           cache: npm
@@ -78,7 +78,6 @@ jobs:
       - name: Install tools
         run: |
           brew install --quiet sevenzip
-          npm install -g @electron/asar
 
       - name: Sync upstream (macOS only)
         run: node scripts/sync-upstream.js --force --skip-win
@@ -107,10 +106,10 @@ jobs:
     runs-on: windows-latest
     steps:
       - name: Checkout
-        uses: actions/checkout@v4
+        uses: actions/checkout@v6
 
       - name: Setup Node.js
-        uses: actions/setup-node@v4
+        uses: actions/setup-node@v6
         with:
           node-version: ${{ env.NODE_VERSION }}
           cache: npm
@@ -123,7 +122,6 @@ jobs:
       - name: Install tools
         run: |
           choco install 7zip -y
-          npm install -g @electron/asar
 
       - name: Add 7zz alias
         run: |
@@ -158,10 +156,10 @@ jobs:
         arch: [x64, arm64]
     steps:
       - name: Checkout
-        uses: actions/checkout@v4
+        uses: actions/checkout@v6
 
       - name: Setup Node.js
-        uses: actions/setup-node@v4
+        uses: actions/setup-node@v6
         with:
           node-version: ${{ env.NODE_VERSION }}
           cache: npm
@@ -177,7 +175,6 @@ jobs:
           npm install @cometix/codex@latest
 
       - name: Install tools
-        run: npm install -g @electron/asar
 
       - name: Sync upstream (macOS ZIP for unix, skip Windows)
         run: node scripts/sync-upstream.js --force --skip-win
@@ -209,12 +206,12 @@ jobs:
       contents: write
     steps:
       - name: Checkout
-        uses: actions/checkout@v4
+        uses: actions/checkout@v6
         with:
           token: ${{ secrets.PAT_TOKEN || secrets.GITHUB_TOKEN }}
 
       - name: Setup Node.js
-        uses: actions/setup-node@v4
+        uses: actions/setup-node@v6
         with:
           node-version: ${{ env.NODE_VERSION }}
 

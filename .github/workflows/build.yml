@@ -22,8 +22,8 @@ jobs:
       matrix:
         arch: [x64, arm64]
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-node@v4
+      - uses: actions/checkout@v6
+      - uses: actions/setup-node@v6
         with:
           node-version: ${{ env.NODE_VERSION }}
           cache: npm
@@ -32,7 +32,6 @@ jobs:
           npm install @cometix/codex@latest
       - run: |
           brew install --quiet sevenzip
-          npm install -g @electron/asar
       - run: node scripts/sync-upstream.js --force --skip-win
       - run: node scripts/patch-all.js unix
       - run: npm run build:mac-${{ matrix.arch }}
@@ -50,8 +49,8 @@ jobs:
     if: inputs.platform == 'all' || inputs.platform == 'windows'
     runs-on: windows-latest
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-node@v4
+      - uses: actions/checkout@v6
+      - uses: actions/setup-node@v6
         with:
           node-version: ${{ env.NODE_VERSION }}
           cache: npm
@@ -60,7 +59,6 @@ jobs:
           npm install @cometix/codex@latest
       - run: |
           choco install 7zip -y
-          npm install -g @electron/asar
       - name: Add 7zz alias
         run: |
           Copy-Item "C:\Program Files\7-Zip\7z.exe" "C:\Program Files\7-Zip\7zz.exe"
@@ -83,8 +81,8 @@ jobs:
       matrix:
         arch: [x64, arm64]
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-node@v4
+      - uses: actions/checkout@v6
+      - uses: actions/setup-node@v6
         with:
           node-version: ${{ env.NODE_VERSION }}
           cache: npm
@@ -94,7 +92,6 @@ jobs:
       - run: |
           sudo apt-get update
           sudo apt-get install -y rpm fakeroot dpkg 7zip
-          npm install -g @electron/asar
       - run: node scripts/sync-upstream.js --force --skip-win
       - run: node scripts/patch-all.js unix
       - run: npm run build:linux-${{ matrix.arch }}
