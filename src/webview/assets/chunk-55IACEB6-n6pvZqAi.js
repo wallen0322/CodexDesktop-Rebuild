@@ -1,2 +1,0 @@
-import{a9 as n,af as o}from"./index-MmO6ZWIv.js";var g=n((t,e)=>{let a;return e==="sandbox"&&(a=o("#i"+t)),(e==="sandbox"?o(a.nodes()[0].contentDocument.body):o("body")).select(`[id="${t}"]`)},"getDiagramElement");export{g};
-//# sourceMappingURL=chunk-55IACEB6-n6pvZqAi.js.map

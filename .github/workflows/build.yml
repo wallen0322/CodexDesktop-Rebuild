@@ -1,11 +1,6 @@
-name: Build & Release
+name: Build & Release (Manual)
 
 on:
-  push:
-    branches: [main]
-    tags: ["v*"]
-  pull_request:
-    branches: [main]
   workflow_dispatch:
     inputs:
       platform:
@@ -13,190 +8,90 @@ on:
         required: false
         default: "all"
         type: choice
-        options:
-          - all
-          - mac
-          - windows
-          - linux
+        options: [all, mac, windows, linux]
 
 env:
   NODE_VERSION: "20"
 
 jobs:
-  # ============================================
-  # macOS 构建 (arm64 + x64)
-  # ============================================
   build-mac:
-    if: ${{ github.event.inputs.platform == 'all' || github.event.inputs.platform == 'mac' || github.event.inputs.platform == '' }}
+    if: inputs.platform == 'all' || inputs.platform == 'mac'
     runs-on: macos-latest
     strategy:
       fail-fast: false
       matrix:
         arch: [x64, arm64]
     steps:
-      - name: Checkout
-        uses: actions/checkout@v4
-        with:
-          lfs: true
-
-      - name: Setup Node.js
-        uses: actions/setup-node@v4
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
         with:
           node-version: ${{ env.NODE_VERSION }}
-          cache: "npm"
-
-      - name: Install dependencies
-        run: npm install
-
-      - name: Build for macOS ${{ matrix.arch }}
-        run: npm run build:mac-${{ matrix.arch }}
+          cache: npm
+      - run: npm ci
+      - run: |
+          brew install --quiet sevenzip
+          npm install -g @electron/asar
+      - run: node scripts/sync-upstream.js --force
+      - run: node scripts/patch-all.js
+      - run: npm run build:mac-${{ matrix.arch }}
         env:
           SKIP_SIGN: "true"
           SKIP_NOTARIZE: "true"
-
-      - name: List outputs
-        run: ls -lhR out/make/
-
-      - name: Upload DMG
-        uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v4
         with:
-          name: Codex-macOS-${{ matrix.arch }}-dmg
-          path: out/make/*.dmg
-          if-no-files-found: error
+          name: Codex-macOS-${{ matrix.arch }}
+          path: |
+            out/make/*.dmg
+            out/make/zip/**/*.zip
 
-      - name: Upload ZIP
-        uses: actions/upload-artifact@v4
-        with:
-          name: Codex-macOS-${{ matrix.arch }}-zip
-          path: out/make/zip/**/*.zip
-          if-no-files-found: error
-
-  # ============================================
-  # Windows 构建 (x64)
-  # ============================================
   build-windows:
-    if: ${{ github.event.inputs.platform == 'all' || github.event.inputs.platform == 'windows' || github.event.inputs.platform == '' }}
+    if: inputs.platform == 'all' || inputs.platform == 'windows'
     runs-on: windows-latest
     steps:
-      - name: Checkout
-        uses: actions/checkout@v4
-        with:
-          lfs: true
-
-      - name: Setup Node.js
-        uses: actions/setup-node@v4
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
         with:
           node-version: ${{ env.NODE_VERSION }}
-          cache: "npm"
-
-      - name: Install dependencies
-        run: npm install
-
-      - name: Build for Windows x64
-        run: npm run build:win-x64
-
-      - name: List outputs
-        run: Get-ChildItem -Recurse out/make/
-
-      - name: Upload Squirrel installer
-        uses: actions/upload-artifact@v4
+          cache: npm
+      - run: npm ci
+      - run: |
+          choco install 7zip -y
+          npm install -g @electron/asar
+      - run: node scripts/sync-upstream.js --force
+      - run: node scripts/patch-all.js
+      - run: npm run build:win-x64
+      - uses: actions/upload-artifact@v4
         with:
-          name: Codex-Windows-x64-setup
-          path: out/make/squirrel.windows/**/*
-          if-no-files-found: warn
+          name: Codex-Windows-x64
+          path: |
+            out/make/squirrel.windows/**/*
+            out/make/zip/**/*.zip
 
-      - name: Upload ZIP
-        uses: actions/upload-artifact@v4
-        with:
-          name: Codex-Windows-x64-zip
-          path: out/make/zip/**/*.zip
-          if-no-files-found: error
-
-  # ============================================
-  # Linux 构建 (arm64 + x64)
-  # ============================================
   build-linux:
-    if: ${{ github.event.inputs.platform == 'all' || github.event.inputs.platform == 'linux' || github.event.inputs.platform == '' }}
+    if: inputs.platform == 'all' || inputs.platform == 'linux'
     runs-on: ubuntu-latest
     strategy:
       fail-fast: false
       matrix:
         arch: [x64, arm64]
     steps:
-      - name: Checkout
-        uses: actions/checkout@v4
-        with:
-          lfs: true
-
-      - name: Setup Node.js
-        uses: actions/setup-node@v4
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
         with:
           node-version: ${{ env.NODE_VERSION }}
-          cache: "npm"
-
-      - name: Install system dependencies
-        run: |
+          cache: npm
+      - run: npm ci
+      - run: |
           sudo apt-get update
-          sudo apt-get install -y rpm fakeroot dpkg
-
-      - name: Install dependencies
-        run: npm install
-
-      - name: Build for Linux ${{ matrix.arch }}
-        run: npm run build:linux-${{ matrix.arch }}
-
-      - name: List outputs
-        run: ls -lhR out/make/
-
-      - name: Upload DEB
-        uses: actions/upload-artifact@v4
+          sudo apt-get install -y rpm fakeroot dpkg p7zip-full
+          npm install -g @electron/asar
+      - run: node scripts/sync-upstream.js --force
+      - run: node scripts/patch-all.js
+      - run: npm run build:linux-${{ matrix.arch }}
+      - uses: actions/upload-artifact@v4
         with:
-          name: Codex-Linux-${{ matrix.arch }}-deb
-          path: out/make/deb/**/*.deb
-          if-no-files-found: warn
-
-      - name: Upload RPM
-        uses: actions/upload-artifact@v4
-        with:
-          name: Codex-Linux-${{ matrix.arch }}-rpm
-          path: out/make/rpm/**/*.rpm
-          if-no-files-found: warn
-
-      - name: Upload ZIP
-        uses: actions/upload-artifact@v4
-        with:
-          name: Codex-Linux-${{ matrix.arch }}-zip
-          path: out/make/zip/**/*.zip
-          if-no-files-found: error
-
-  # ============================================
-  # 创建 GitHub Release
-  # ============================================
-  release:
-    needs: [build-mac, build-windows, build-linux]
-    runs-on: ubuntu-latest
-    if: startsWith(github.ref, 'refs/tags/v')
-    permissions:
-      contents: write
-    steps:
-      - name: Download all artifacts
-        uses: actions/download-artifact@v4
-        with:
-          path: artifacts
-
-      - name: Display structure
-        run: ls -lhR artifacts/
-
-      - name: Create Release
-        uses: softprops/action-gh-release@v2
-        with:
-          files: |
-            artifacts/**/*.dmg
-            artifacts/**/*.zip
-            artifacts/**/*.deb
-            artifacts/**/*.rpm
-            artifacts/**/*.exe
-          draft: true
-          generate_release_notes: true
-        env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          name: Codex-Linux-${{ matrix.arch }}
+          path: |
+            out/make/deb/**/*.deb
+            out/make/rpm/**/*.rpm
+            out/make/zip/**/*.zip

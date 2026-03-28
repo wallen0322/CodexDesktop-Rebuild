@@ -1,2 +1,0 @@
-import{a9 as a,ah as w,ag as x}from"./index-MmO6ZWIv.js";var d=a((e,t,i,r)=>{e.attr("class",i);const{width:o,height:h,x:n,y:c}=u(e,t);w(e,h,o,r);const s=g(n,c,o,h,t);e.attr("viewBox",s),x.debug(`viewBox configured: ${s} with padding: ${t}`)},"setupViewPortForSVG"),u=a((e,t)=>{const i=e.node()?.getBBox()||{width:0,height:0,x:0,y:0};return{width:i.width+t*2,height:i.height+t*2,x:i.x,y:i.y}},"calculateDimensionsWithPadding"),g=a((e,t,i,r,o)=>`${e-o} ${t-o} ${i} ${r}`,"createViewBox");export{d as s};
-//# sourceMappingURL=chunk-QN33PNHL-CUjnpm0m.js.map

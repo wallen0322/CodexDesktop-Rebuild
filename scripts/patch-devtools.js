@@ -1,48 +1,34 @@
 #!/usr/bin/env node
-// ============================================================
-//  patch-devtools.js — AST 补丁：强制启用 DevTools & InspectElement
-//
-//  策略：
-//    在 main bundle 中查找 Property 节点:
-//    - allowInspectElement: <Identifier>  →  allowInspectElement: !0
-//    - devTools: <MemberExpression>       →  devTools: !0
-//
-//  用法：
-//    node scripts/patch-devtools.js           # 执行 patch
-//    node scripts/patch-devtools.js --check   # 仅检查匹配
-// ============================================================
-
+/**
+ * Post-build patch: Force-enable DevTools & InspectElement
+ *
+ * Strategy (AST-based):
+ *   In the main bundle, find Property nodes:
+ *   - allowInspectElement: <value>  ->  allowInspectElement: !0
+ *   - devTools: <expr containing allowDevtools>  ->  devTools: !0
+ *
+ * Usage:
+ *   node scripts/patch-devtools.js [platform]   # Apply patch (unix/win/omit=both)
+ *   node scripts/patch-devtools.js --check      # Dry-run: report matches
+ */
 const fs = require("fs");
 const path = require("path");
 const { parse } = require("acorn");
+const { locateBundles, relPath } = require("./patch-util");
 
-// ─── 1. 定位 main bundle ─────────────────────────────────
-function locateBundle() {
-  const buildDir = path.join(__dirname, "..", "src", ".vite", "build");
-  if (!fs.existsSync(buildDir)) {
-    console.error("❌ 构建目录不存在:", buildDir);
-    process.exit(1);
-  }
-  const files = fs.readdirSync(buildDir);
-  // 优先带 hash 的 main-{hash}.js，回退到 main.js
-  const mainFile = files.find(f => /^main(-[^.]+)?\.js$/.test(f));
-  if (!mainFile) {
-    console.error("❌ 未找到 main bundle (main*.js)");
-    process.exit(1);
-  }
-  return path.join(buildDir, mainFile);
-}
+// ──────────────────────────────────────────────
+//  AST walker
+// ──────────────────────────────────────────────
 
-// ─── 2. AST 引擎 ─────────────────────────────────────────
-function walkAST(node, visitor) {
+function walkAST(node, visitor, parent) {
   if (!node || typeof node !== "object") return;
-  if (node.type) visitor(node);
+  if (node.type) visitor(node, parent);
   for (const key of Object.keys(node)) {
     const child = node[key];
     if (Array.isArray(child)) {
-      child.forEach(c => walkAST(c, visitor));
+      child.forEach((c) => walkAST(c, visitor, node));
     } else if (child && typeof child === "object" && child.type) {
-      walkAST(child, visitor);
+      walkAST(child, visitor, node);
     }
   }
 }
@@ -54,111 +40,109 @@ function getPropertyName(node) {
   return null;
 }
 
-// ─── 3. 声明式规则 ────────────────────────────────────────
+// ──────────────────────────────────────────────
+//  Declarative rules
+// ──────────────────────────────────────────────
+
 const RULES = [
   {
     id: "allowInspectElement",
-    description: "allowInspectElement: <value> → allowInspectElement: !0",
-    match(node, source) {
+    match(node, source, parent) {
       if (node.type !== "Property") return null;
       if (getPropertyName(node.key) !== "allowInspectElement") return null;
-
+      // Skip destructured function params (ObjectPattern context)
+      if (parent && parent.type === "ObjectPattern") return null;
+      if (node.shorthand) return null;
       const val = node.value;
-      // 跳过已经是 !0 的
       const valSrc = source.slice(val.start, val.end);
       if (valSrc === "!0") return null;
-
-      // 跳过函数参数定义（key 和 value 是同一个 Identifier 节点，即解构简写）
-      if (node.shorthand) return null;
-
-      return {
-        start: val.start,
-        end: val.end,
-        replacement: "!0",
-        original: valSrc,
-      };
+      // Skip if value is a binding target (Identifier in pattern-like position)
+      // Only patch when value is clearly an expression (MemberExpression, Identifier used as value)
+      return { start: val.start, end: val.end, replacement: "!0", original: valSrc };
     },
   },
   {
     id: "devTools",
-    description: "devTools: this.options.allowDevtools → devTools: !0",
     match(node, source) {
       if (node.type !== "Property") return null;
       if (getPropertyName(node.key) !== "devTools") return null;
-
       const val = node.value;
       const valSrc = source.slice(val.start, val.end);
       if (valSrc === "!0") return null;
-
-      // 只匹配 devTools 在 webPreferences 上下文中的用法（值引用 allowDevtools）
-      if (!valSrc.includes("allowDevtools") && !valSrc.includes("allowDevTools")) return null;
-
-      return {
-        start: val.start,
-        end: val.end,
-        replacement: "!0",
-        original: valSrc,
-      };
+      if (!valSrc.includes("allowDevtools") && !valSrc.includes("allowDevTools"))
+        return null;
+      return { start: val.start, end: val.end, replacement: "!0", original: valSrc };
     },
   },
 ];
 
-// ─── 4. 主流程 ────────────────────────────────────────────
+// ──────────────────────────────────────────────
+//  Main
+// ──────────────────────────────────────────────
+
 function main() {
-  const isCheck = process.argv.includes("--check");
-  const bundlePath = locateBundle();
-  const source = fs.readFileSync(bundlePath, "utf-8");
+  const args = process.argv.slice(2);
+  const isCheck = args.includes("--check");
+  const platform = args.find((a) => a === "unix" || a === "win");
 
-  console.log(`📄 目标文件: ${path.relative(process.cwd(), bundlePath)}`);
-  console.log(`📏 文件大小: ${(source.length / 1048576).toFixed(1)} MB`);
-
-  const t0 = Date.now();
-  const ast = parse(source, {
-    ecmaVersion: "latest",
-    sourceType: "module",
-  });
-  console.log(`🔍 AST 解析: ${Date.now() - t0}ms`);
-
-  // 收集 patches
-  const patches = [];
-  const seen = new Set();
-
-  walkAST(ast, (node) => {
-    for (const rule of RULES) {
-      const result = rule.match(node, source);
-      if (!result) continue;
-      const key = `${result.start}:${result.end}`;
-      if (seen.has(key)) continue;
-      seen.add(key);
-      patches.push({ ...result, rule: rule.id, description: rule.description });
-    }
+  const bundles = locateBundles({
+    dir: "build",
+    pattern: /^main(-[^.]+)?\.js$/,
+    platform,
   });
 
-  if (patches.length === 0) {
-    console.log("\n✅ 无需修改（DevTools 已处于启用状态）");
-    return;
+  if (bundles.length === 0) {
+    console.error("[x] No main bundle found");
+    process.exit(1);
   }
 
-  // 按 start 降序排列（从后往前替换，避免偏移漂移）
-  patches.sort((a, b) => b.start - a.start);
+  for (const bundle of bundles) {
+    console.log(`\n-- [${bundle.platform}] ${relPath(bundle.path)}`);
+    const source = fs.readFileSync(bundle.path, "utf-8");
+    console.log(`   size: ${(source.length / 1048576).toFixed(1)} MB`);
 
-  if (isCheck) {
-    console.log(`\n🔎 匹配报告: ${patches.length} 处`);
-    for (const p of [...patches].reverse()) {
-      console.log(`  📍 [${p.rule}] 位置 ${p.start}: ${p.original} → ${p.replacement}`);
+    const t0 = Date.now();
+    const ast = parse(source, { ecmaVersion: "latest", sourceType: "module" });
+    console.log(`   parse: ${Date.now() - t0}ms`);
+
+    const patches = [];
+    const seen = new Set();
+
+    walkAST(ast, (node, parent) => {
+      for (const rule of RULES) {
+        const result = rule.match(node, source, parent);
+        if (!result) continue;
+        const key = `${result.start}:${result.end}`;
+        if (seen.has(key)) continue;
+        seen.add(key);
+        patches.push({ ...result, rule: rule.id });
+      }
+    });
+
+    if (patches.length === 0) {
+      console.log("   [ok] DevTools already enabled or no match");
+      continue;
     }
-    return;
-  }
 
-  // 执行替换
-  let patched = source;
-  for (const p of patches) {
-    console.log(`  ✏️  [${p.rule}] 位置 ${p.start}: ${p.original} → ${p.replacement}`);
-    patched = patched.slice(0, p.start) + p.replacement + patched.slice(p.end);
-  }
+    patches.sort((a, b) => b.start - a.start);
 
-  fs.writeFileSync(bundlePath, patched, "utf-8");
-  console.log(`\n✅ DevTools 已强制启用: ${patches.length} 处修改`);
+    if (isCheck) {
+      console.log(`   [?] Matches: ${patches.length}`);
+      for (const p of [...patches].reverse()) {
+        console.log(`     > [${p.rule}] offset ${p.start}: ${p.original} -> ${p.replacement}`);
+      }
+      continue;
+    }
+
+    let patched = source;
+    for (const p of patches) {
+      console.log(`   * [${p.rule}] offset ${p.start}: ${p.original} -> ${p.replacement}`);
+      patched = patched.slice(0, p.start) + p.replacement + patched.slice(p.end);
+    }
+
+    fs.writeFileSync(bundle.path, patched, "utf-8");
+    console.log(`   [ok] DevTools force-enabled: ${patches.length} replacements`);
+  }
 }
 
 main();

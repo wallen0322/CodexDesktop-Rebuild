@@ -1,26 +1,32 @@
 {
   "name": "codex-rebuild",
   "productName": "Codex",
-  "version": "1.0.4",
+  "version": "26.325.31654",
   "description": "Codex Electron App - Cross-platform Build",
-  "main": "src/.vite/build/main.js",
+  "main": "src/.vite/build/bootstrap.js",
   "scripts": {
     "start": "node scripts/start-dev.js",
     "dev": "node scripts/start-dev.js",
-    "patch": "node scripts/patch-copyright.js && node scripts/patch-i18n.js && node scripts/patch-sunset.js && node scripts/patch-devtools.js",
+    "patch": "node scripts/patch-all.js",
+    "patch:unix": "node scripts/patch-all.js unix",
+    "patch:win": "node scripts/patch-all.js win",
+    "prepare:unix": "node scripts/prepare-src.js --platform unix",
+    "prepare:win": "node scripts/prepare-src.js --platform win",
     "forge:package": "electron-forge package",
-    "forge:make": "npm run patch && electron-forge make",
-    "build": "npm run build:current",
-    "build:current": "npm run forge:make",
-    "build:mac": "npm run patch && npm run build:mac-arm64 && npm run build:mac-x64",
-    "build:mac-arm64": "npm run patch && electron-forge make --platform=darwin --arch=arm64",
-    "build:mac-x64": "npm run patch && electron-forge make --platform=darwin --arch=x64",
+    "forge:make": "electron-forge make",
+    "build": "npm run build:mac-arm64",
+    "build:mac-arm64": "npm run prepare:unix && rm -rf out && electron-forge make --platform=darwin --arch=arm64",
+    "build:mac-x64": "npm run prepare:unix && rm -rf out && electron-forge make --platform=darwin --arch=x64",
+    "build:mac": "npm run build:mac-arm64 && npm run build:mac-x64",
+    "build:win-x64": "npm run prepare:win && rm -rf out && electron-forge make --platform=win32 --arch=x64",
     "build:win": "npm run build:win-x64",
-    "build:win-x64": "npm run patch && electron-forge make --platform=win32 --arch=x64",
-    "build:linux": "npm run patch && npm run build:linux-x64 && npm run build:linux-arm64",
-    "build:linux-x64": "npm run patch && electron-forge make --platform=linux --arch=x64",
-    "build:linux-arm64": "npm run patch && electron-forge make --platform=linux --arch=arm64",
+    "build:linux-x64": "npm run prepare:unix && rm -rf out && electron-forge make --platform=linux --arch=x64",
+    "build:linux-arm64": "npm run prepare:unix && rm -rf out && electron-forge make --platform=linux --arch=arm64",
+    "build:linux": "npm run build:linux-x64 && npm run build:linux-arm64",
     "build:all": "npm run build:mac && npm run build:win && npm run build:linux",
+    "sync": "node scripts/sync-upstream.js",
+    "check-update": "node scripts/check-update.js",
+    "bump-version": "node scripts/bump-version.js",
     "postinstall": "npm run rebuild:native",
     "rebuild:native": "electron-rebuild"
   },
@@ -35,7 +41,9 @@
     "@electron-forge/plugin-fuses": "^7.10.2",
     "@electron/fuses": "^1.8.0",
     "@electron/rebuild": "^3.7.1",
-    "electron": "40.0.0"
+    "acorn": "^8.16.0",
+    "electron": "40.0.0",
+    "fast-xml-parser": "^5.5.9"
   },
   "dependencies": {
     "@sentry/electron": "^7.5.0",
@@ -51,12 +59,15 @@
     "shell-env": "^4.0.1",
     "shlex": "^3.0.0",
     "smol-toml": "^1.5.2",
+    "tslib": "^2.8.1",
     "zod": "^4.1.13"
   },
   "optionalDependencies": {
-    "@cometix/codex": "^0.105.0-cometix",
+    "@cometix/codex": "^0.116.0-cometix",
     "electron-liquid-glass": "1.1.1"
   },
   "codexBuildFlavor": "prod",
-  "codexBuildNumber": "517"
+  "codexBuildNumber": "1272",
+  "codexSparkleFeedUrl": "https://persistent.oaistatic.com/codex-app-prod/appcast.xml",
+  "codexSparklePublicKey": "rhcBvttuqDFriyNqwTQJR3L4UT1WjIK4QxtwtwusVic="
 }
