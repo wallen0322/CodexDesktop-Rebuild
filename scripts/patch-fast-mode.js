@@ -21,6 +21,7 @@
  *   node scripts/patch-fast-mode.js --check       # Dry-run
  */
 const fs = require("fs");
+const path = require("path");
 const { parse } = require("acorn");
 const { locateBundles, relPath } = require("./patch-util");
 
@@ -175,24 +176,31 @@ function main() {
   const isCheck = args.includes("--check");
   const platform = args.find((a) => a === "unix" || a === "win");
 
-  const bundles = locateBundles({
-    dir: "assets",
-    pattern: /^general-settings-.*\.js$/,
-    platform,
-  });
+  // Scan JS chunks for fast_mode gate logic (chunk name varies across versions)
+  const { SRC_DIR } = require("./patch-util");
+  const platforms = platform
+    ? [platform]
+    : ["unix", "win"].filter((p) =>
+        fs.existsSync(path.join(SRC_DIR, p, "webview", "assets"))
+      );
 
-  if (bundles.length === 0) {
-    console.error("[x] No general-settings chunk found");
-    process.exit(1);
+  const targets = [];
+  for (const plat of platforms) {
+    const assetsDir = path.join(SRC_DIR, plat, "webview", "assets");
+    if (!fs.existsSync(assetsDir)) continue;
+    for (const f of fs.readdirSync(assetsDir)) {
+      if (!f.endsWith(".js")) continue;
+      if (f.startsWith("index-")) continue; // index has refs but not the gate function
+      const fp = path.join(assetsDir, f);
+      const src = fs.readFileSync(fp, "utf-8");
+      if (src.includes(FEATURE_STORE_KEY) && src.includes(FAST_MODE_KEY)) {
+        targets.push({ platform: plat, path: fp });
+      }
+    }
   }
 
-  // Filter to only chunks that contain fast_mode
-  const targets = bundles.filter((b) =>
-    fs.readFileSync(b.path, "utf-8").includes(FAST_MODE_KEY)
-  );
-
   if (targets.length === 0) {
-    console.error("[x] No general-settings chunk contains fast_mode logic");
+    console.error("[x] No chunk contains fast_mode gate logic");
     process.exit(1);
   }
 
@@ -212,7 +220,7 @@ function main() {
         // Check if already patched
         const idx = source.indexOf(FEATURE_STORE_KEY);
         const nearby = source.slice(idx, idx + 300);
-        if (nearby.includes("!0&&!0") || !nearby.includes("&&")) {
+        if (!nearby.includes("===!0&&")) {
           console.log("   [ok] Fast mode already force-enabled");
         } else {
           console.log("   [!] fast_mode gate found but AST pattern did not match");
