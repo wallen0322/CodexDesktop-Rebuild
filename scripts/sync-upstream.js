@@ -167,6 +167,7 @@ async function syncMac(macInfo) {
   for (const cmd of [
     `7zz x -y -o"${extractDir}" "${zipPath}"`,
     `7z x -y -o"${extractDir}" "${zipPath}"`,
+    `tar -xf "${zipPath}" -C "${extractDir}"`,
     `unzip -o "${zipPath}" -d "${extractDir}"`,
   ]) {
     try {
@@ -239,6 +240,7 @@ async function syncWin(winInfo) {
   for (const cmd of [
     `7zz x -y -o"${extractDir}" "${msixPath}"`,
     `7z x -y -o"${extractDir}" "${msixPath}"`,
+    `tar -xf "${msixPath}" -C "${extractDir}"`,
   ]) {
     try {
       execSync(cmd, { stdio: "pipe" });

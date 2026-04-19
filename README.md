@@ -51,12 +51,6 @@ npm run dev
 └── package.json
 ```
 
-## CI/CD
-
-GitHub Actions automatically builds on:
-- Push to `master`
-- Tag `v*` → Creates draft release
-
 ## Credits
 
 **© OpenAI · Cometix Space**

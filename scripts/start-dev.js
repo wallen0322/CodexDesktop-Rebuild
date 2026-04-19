@@ -46,11 +46,28 @@ const TARGET_TRIPLE_MAP = {
   'win32-x64': 'x86_64-pc-windows-msvc',
 };
 
+function getVendorRoots() {
+  return [
+    path.join(__dirname, '..', 'node_modules', '@openai', `codex-${binDir}`),
+    path.join(__dirname, '..', 'node_modules', '@openai', 'codex'),
+    path.join(__dirname, '..', 'node_modules', '@cometix', 'codex'),
+  ];
+}
+
+function getVendorBinaryPath() {
+  for (const root of getVendorRoots()) {
+    const vendorPath = path.join(root, 'vendor', triple, 'codex', cliName);
+    if (fs.existsSync(vendorPath)) return vendorPath;
+  }
+
+  return null;
+}
+
 // 从 npm vendor 同步到 resources/bin/
 const triple = TARGET_TRIPLE_MAP[binDir];
 if (triple) {
-  const vendorPath = path.join(__dirname, '..', 'node_modules', '@cometix', 'codex', 'vendor', triple, 'codex', cliName);
-  if (fs.existsSync(vendorPath)) {
+  const vendorPath = getVendorBinaryPath();
+  if (vendorPath && fs.existsSync(vendorPath)) {
     const localDir = path.join(__dirname, '..', 'resources', 'bin', binDir);
     fs.mkdirSync(localDir, { recursive: true });
     fs.copyFileSync(vendorPath, path.join(localDir, cliName));
@@ -64,7 +81,7 @@ const cliPath = localCliPath;
 // Verify CLI exists
 if (!fs.existsSync(cliPath)) {
   console.error(`CLI not found at: ${cliPath}`);
-  console.error('Tried: resources/bin/ and node_modules/@cometix/codex/vendor/');
+  console.error('Tried: resources/bin/, node_modules/@openai/codex-*/vendor/, and node_modules/@cometix/codex/vendor/');
   process.exit(1);
 }
 
