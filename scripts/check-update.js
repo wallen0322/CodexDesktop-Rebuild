@@ -28,8 +28,8 @@ for (const f of ["ms-root-ca.pem", "ms-update-ca.pem"]) {
 https.globalAgent.options.ca = extraCAs;
 
 // ─── 常量 ────────────────────────────────────────────────────────
-const APPCAST_URL =
-  "https://persistent.oaistatic.com/codex-app-prod/appcast.xml";
+const APPCAST_ARM64 = "https://persistent.oaistatic.com/codex-app-prod/appcast.xml";
+const APPCAST_X64 = "https://persistent.oaistatic.com/codex-app-prod/appcast-x64.xml";
 const MS_STORE_PRODUCT_ID = "9plm9xgg6vks";
 const VERSION_FILE = path.join(__dirname, ".versions.json");
 
@@ -54,9 +54,12 @@ function httpsGet(url) {
   });
 }
 
-// ─── macOS: Sparkle appcast.xml ──────────────────────────────────
-async function checkMacVersion() {
-  const res = await httpsGet(APPCAST_URL);
+// ─── macOS: Sparkle appcast ──────────────────────────────────────
+async function checkMacArm64Version() { return checkAppcast(APPCAST_ARM64, "macOS-arm64"); }
+async function checkMacX64Version() { return checkAppcast(APPCAST_X64, "macOS-x64"); }
+
+async function checkAppcast(url, platformLabel) {
+  const res = await httpsGet(url);
   if (res.status !== 200) {
     throw new Error(`appcast.xml 请求失败: HTTP ${res.status}`);
   }
@@ -72,14 +75,13 @@ async function checkMacVersion() {
   const items = parsed.rss?.channel?.item;
   const latest = Array.isArray(items) ? items[0] : items;
 
-  if (!latest) throw new Error("appcast.xml 中未找到版本信息");
+  if (!latest) throw new Error(`${platformLabel}: no version in appcast`);
 
-  // 提取主 enclosure（完整包）
   let enclosure = latest.enclosure;
   if (Array.isArray(enclosure)) enclosure = enclosure[0];
 
   return {
-    platform: "macOS",
+    platform: platformLabel,
     version: latest.shortVersionString || latest.title,
     build: String(latest.version || ""),
     pubDate: latest.pubDate || "",
@@ -168,35 +170,22 @@ async function main() {
   const results = [];
   const updates = [];
 
-  // 并行检查两个平台
-  if (!quiet) console.log("🔍 检查更新...\n");
-
-  const [macResult, winResult] = await Promise.allSettled([
-    checkMacVersion(),
+  const checks = await Promise.allSettled([
+    checkMacArm64Version(),
+    checkMacX64Version(),
     checkWindowsVersion(),
   ]);
 
-  // macOS
-  if (macResult.status === "fulfilled") {
-    const mac = macResult.value;
-    results.push(mac);
-    const isNew =
-      !saved.macOS ||
-      saved.macOS.version !== mac.version ||
-      saved.macOS.build !== mac.build;
-    if (isNew) updates.push(mac);
-  } else if (!quiet) {
-    console.error(`  ⚠️  macOS 检查失败: ${macResult.reason.message}`);
-  }
-
-  // Windows
-  if (winResult.status === "fulfilled") {
-    const win = winResult.value;
-    results.push(win);
-    const isNew = !saved.Windows || saved.Windows.version !== win.version;
-    if (isNew) updates.push(win);
-  } else if (!quiet) {
-    console.error(`  ⚠️  Windows 检查失败: ${winResult.reason.message}`);
+  for (const r of checks) {
+    if (r.status === "fulfilled") {
+      const info = r.value;
+      results.push(info);
+      const key = info.platform;
+      const isNew = !saved[key] || saved[key].version !== info.version || saved[key].build !== info.build;
+      if (isNew) updates.push(info);
+    } else if (!quiet) {
+      console.error(`  [!] ${r.reason.message}`);
+    }
   }
 
   // JSON 输出模式
@@ -256,7 +245,7 @@ async function main() {
   return { results, updates };
 }
 
-module.exports = { checkMacVersion, checkWindowsVersion };
+module.exports = { checkMacArm64Version, checkMacX64Version, checkWindowsVersion };
 
 if (require.main === module) {
   main().catch((e) => {

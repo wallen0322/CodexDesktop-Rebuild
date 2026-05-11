@@ -1,35 +1,31 @@
 {
   "name": "codex-rebuild",
   "productName": "Codex",
-  "version": "26.415.40636",
+  "version": "26.506.31421",
   "description": "Codex Electron App - Cross-platform Build",
   "main": "src/.vite/build/bootstrap.js",
   "scripts": {
     "start": "node scripts/start-dev.js",
     "dev": "node scripts/start-dev.js",
     "patch": "node scripts/patch-all.js",
-    "patch:unix": "node scripts/patch-all.js unix",
+    "patch:mac": "node scripts/patch-all.js mac-arm64 && node scripts/patch-all.js mac-x64",
     "patch:win": "node scripts/patch-all.js win",
-    "prepare:unix": "node scripts/prepare-src.js --platform unix",
-    "prepare:win": "node scripts/prepare-src.js --platform win",
-    "clean:out": "node -e \"require('fs').rmSync('out',{ recursive: true, force: true })\"",
     "forge:package": "electron-forge package",
     "forge:make": "electron-forge make",
     "build": "npm run build:mac-arm64",
-    "build:mac-arm64": "npm run prepare:unix && npm run clean:out && electron-forge make --platform=darwin --arch=arm64",
-    "build:mac-x64": "npm run prepare:unix && npm run clean:out && electron-forge make --platform=darwin --arch=x64",
+    "build:mac-arm64": "node scripts/build-from-upstream.js --platform mac-arm64",
+    "build:mac-x64": "node scripts/build-from-upstream.js --platform mac-x64",
     "build:mac": "npm run build:mac-arm64 && npm run build:mac-x64",
-    "build:win-x64": "npm run prepare:win && npm run clean:out && electron-forge make --platform=win32 --arch=x64",
+    "build:win-x64": "node scripts/build-from-upstream.js --platform win",
     "build:win": "npm run build:win-x64",
-    "build:linux-x64": "npm run prepare:unix && npm run clean:out && electron-forge make --platform=linux --arch=x64",
-    "build:linux-arm64": "npm run prepare:unix && npm run clean:out && electron-forge make --platform=linux --arch=arm64",
+    "build:linux-x64": "node scripts/prepare-src.js --platform linux-x64 && npm run rebuild:native && node scripts/sync-native-modules.js --platform linux-x64 && rm -rf out && electron-forge make --platform=linux --arch=x64",
+    "build:linux-arm64": "node scripts/prepare-src.js --platform linux-arm64 && npm run rebuild:native && node scripts/sync-native-modules.js --platform linux-arm64 && rm -rf out && electron-forge make --platform=linux --arch=arm64",
     "build:linux": "npm run build:linux-x64 && npm run build:linux-arm64",
     "build:all": "npm run build:mac && npm run build:win && npm run build:linux",
     "sync": "node scripts/sync-upstream.js",
     "check-update": "node scripts/check-update.js",
     "bump-version": "node scripts/bump-version.js",
-    "postinstall": "npm run rebuild:native",
-    "rebuild:native": "electron-rebuild -o better-sqlite3"
+    "rebuild:native": "electron-rebuild"
   },
   "devDependencies": {
     "@electron-forge/cli": "^7.10.2",
@@ -44,7 +40,7 @@
     "@electron/fuses": "^1.8.0",
     "@electron/rebuild": "^3.7.1",
     "acorn": "^8.16.0",
-    "electron": "40.0.0",
+    "electron": "^41.2.0",
     "fast-xml-parser": "^5.5.9"
   },
   "dependencies": {
@@ -65,14 +61,8 @@
     "tslib": "^2.8.1",
     "zod": "^4.1.13"
   },
-  "optionalDependencies": {
-    "@openai/codex": "0.121.0",
-    "electron-liquid-glass": "1.1.1"
-  },
   "codexBuildFlavor": "prod",
-  "codexBuildNumber": "1799",
+  "codexBuildNumber": "1272",
   "codexSparkleFeedUrl": "https://persistent.oaistatic.com/codex-app-prod/appcast.xml",
-  "codexSparklePublicKey": "rhcBvttuqDFriyNqwTQJR3L4UT1WjIK4QxtwtwusVic=",
-  "codexWindowsPackageIdentity": "OpenAI.Codex",
-  "codexWindowsPackagePublisher": "CN=50BDFD77-8903-4850-9FFE-6E8522F64D5B"
+  "codexSparklePublicKey": "rhcBvttuqDFriyNqwTQJR3L4UT1WjIK4QxtwtwusVic="
 }

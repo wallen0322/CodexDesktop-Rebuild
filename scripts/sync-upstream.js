@@ -1,19 +1,19 @@
 #!/usr/bin/env node
 /**
- * sync-upstream.js — 从上游 Codex 官方构建中提取 ASAR 资源
+ * sync-upstream.js — Extract full upstream Codex resources
  *
- * 流程:
- *   1. 检测最新版本 (appcast.xml + MS Store)
- *   2. 下载 macOS ZIP + Windows MSIX
- *   3. 解包并提取 app.asar
- *   4. 落盘到 src/{unix,win}/
+ * Output structure per platform:
+ *   src/{platform}/
+ *     _asar/              Extracted app.asar content (patch target)
+ *     app.asar.unpacked/  Native modules (kept as-is from upstream)
+ *     codex|codex.exe     CLI binary (will be replaced by @cometix/codex)
+ *     rg|rg.exe           ripgrep binary (kept from upstream)
+ *     plugins/            Bundled plugins
+ *     native/             Platform native modules
+ *     ...                 All other upstream resources
  *
- * 用法:
- *   node scripts/sync-upstream.js                 # 仅有更新时同步
- *   node scripts/sync-upstream.js --force         # 强制重新同步
- *   node scripts/sync-upstream.js --check-only    # 仅检查版本不下载
- *   node scripts/sync-upstream.js --skip-mac      # 跳过 macOS
- *   node scripts/sync-upstream.js --skip-win      # 跳过 Windows
+ * Usage:
+ *   node scripts/sync-upstream.js [--force] [--skip-mac] [--skip-win]
  */
 
 const https = require("https");
@@ -21,9 +21,9 @@ const tls = require("tls");
 const http = require("http");
 const fs = require("fs");
 const path = require("path");
-const { execSync, execFileSync } = require("child_process");
+const { execSync } = require("child_process");
 
-// ─── 证书注入 ────────────────────────────────────────────────────
+// TLS certs for MS delivery CDN
 const certsDir = path.join(__dirname, "certs");
 const extraCAs = [...tls.rootCertificates];
 for (const f of ["ms-root-ca.pem", "ms-update-ca.pem"]) {
@@ -32,413 +32,299 @@ for (const f of ["ms-root-ca.pem", "ms-update-ca.pem"]) {
 }
 https.globalAgent.options.ca = extraCAs;
 
-// ─── 常量 ────────────────────────────────────────────────────────
 const PROJECT_ROOT = path.resolve(__dirname, "..");
-const SRC_UNIX = path.join(PROJECT_ROOT, "src", "unix");
-const SRC_WIN = path.join(PROJECT_ROOT, "src", "win");
+const SRC_DIR = path.join(PROJECT_ROOT, "src");
 const TEMP_DIR = path.join(require("os").tmpdir(), "codex-sync");
 const VERSION_FILE = path.join(__dirname, ".versions.json");
 
-// ─── 参数解析 ────────────────────────────────────────────────────
+const APPCAST_ARM64 = "https://persistent.oaistatic.com/codex-app-prod/appcast.xml";
+const APPCAST_X64 = "https://persistent.oaistatic.com/codex-app-prod/appcast-x64.xml";
+
 const args = process.argv.slice(2);
 const FORCE = args.includes("--force");
 const CHECK_ONLY = args.includes("--check-only");
 const SKIP_MAC = args.includes("--skip-mac");
 const SKIP_WIN = args.includes("--skip-win");
 
-// ─── HTTP 辅助 ───────────────────────────────────────────────────
+// ─── Helpers ────────────────────────────────────────────────────
+
 function httpGet(url) {
   const mod = url.startsWith("https") ? https : http;
   return new Promise((resolve, reject) => {
-    mod
-      .get(url, (res) => {
-        if (
-          res.statusCode >= 300 &&
-          res.statusCode < 400 &&
-          res.headers.location
-        ) {
-          return httpGet(res.headers.location).then(resolve, reject);
-        }
-        const chunks = [];
-        res.on("data", (c) => chunks.push(c));
-        res.on("end", () =>
-          resolve({
-            status: res.statusCode,
-            headers: res.headers,
-            body: Buffer.concat(chunks),
-          })
-        );
-      })
-      .on("error", reject);
+    mod.get(url, (res) => {
+      if (res.statusCode >= 300 && res.statusCode < 400 && res.headers.location)
+        return httpGet(res.headers.location).then(resolve, reject);
+      const chunks = [];
+      res.on("data", (c) => chunks.push(c));
+      res.on("end", () => resolve({ status: res.statusCode, body: Buffer.concat(chunks) }));
+    }).on("error", reject);
   });
 }
 
-function downloadToFile(url, destPath, label = "") {
-  const mod = url.startsWith("https") ? https : http;
-  return new Promise((resolve, reject) => {
-    const file = fs.createWriteStream(destPath);
-    const doRequest = (reqUrl) => {
-      const reqMod = reqUrl.startsWith("https") ? https : http;
-      reqMod
-        .get(reqUrl, (res) => {
-          if (
-            res.statusCode >= 300 &&
-            res.statusCode < 400 &&
-            res.headers.location
-          ) {
-            return doRequest(res.headers.location);
-          }
-          const total = parseInt(res.headers["content-length"] || "0", 10);
-          let downloaded = 0;
-          res.on("data", (chunk) => {
-            downloaded += chunk.length;
-            file.write(chunk);
-            if (total > 0 && process.stdout.isTTY) {
-              const pct = ((downloaded / total) * 100).toFixed(1);
-              const mb = (downloaded / 1024 / 1024).toFixed(1);
-              const totalMb = (total / 1024 / 1024).toFixed(1);
-              process.stdout.write(
-                `\r  ⬇️  ${label} ${pct}% (${mb}/${totalMb} MB)`
-              );
-            }
-          });
-          res.on("end", () => {
-            file.end();
-            if (process.stdout.isTTY) process.stdout.write("\n");
-            // 校验下载完整性
-            if (total > 0 && downloaded < total) {
-              fs.unlinkSync(destPath);
-              reject(
-                new Error(
-                  `下载不完整: ${downloaded}/${total} 字节 (${label})`
-                )
-              );
-            } else {
-              resolve(destPath);
-            }
-          });
-          res.on("error", reject);
-        })
-        .on("error", reject);
-    };
-    doRequest(url);
-  });
+function curlDownload(url, dest, label) {
+  console.log(`  [dl] ${label}`);
+  execSync(`curl -L --retry 3 --retry-delay 2 -o "${dest}" "${url}"`, { stdio: "inherit" });
 }
 
-// ─── 版本检测 ────────────────────────────────────────────────────
-const { checkMacVersion, checkWindowsVersion } = require("./check-update");
-
-function loadVersions() {
-  try {
-    return JSON.parse(fs.readFileSync(VERSION_FILE, "utf-8"));
-  } catch {
-    return {};
-  }
-}
-
-function saveVersions(versions) {
-  fs.writeFileSync(VERSION_FILE, JSON.stringify(versions, null, 2) + "\n");
-}
-
-// ─── macOS: ZIP 解包提取 ASAR ───────────────────────────────────
-async function syncMac(macInfo) {
-  const zipPath = path.join(TEMP_DIR, `Codex-mac-${macInfo.version}.zip`);
-  const extractDir = path.join(TEMP_DIR, "mac-extract");
-
-  // 下载 (curl is more reliable than Node https for large files in CI)
-  if (!fs.existsSync(zipPath)) {
-    console.log(`\n📥 下载 macOS ZIP: ${macInfo.version}`);
-    execSync(
-      `curl -L --retry 3 --retry-delay 2 -o "${zipPath}" "${macInfo.downloadUrl}"`,
-      { stdio: "inherit" }
-    );
+function extractArchive(archive, dest) {
+  if (process.platform === "darwin" && archive.endsWith(".zip")) {
+    // ditto preserves macOS symlinks + resource forks (required for .app)
+    execSync(`ditto -xk "${archive}" "${dest}"`);
   } else {
-    console.log(`\n📦 使用缓存: ${zipPath}`);
-  }
-
-  // 解压 ZIP（macOS Sparkle ZIP 可能非标准，用 ditto 或 7z）
-  console.log("  📂 解压 ZIP...");
-  if (fs.existsSync(extractDir)) {
-    fs.rmSync(extractDir, { recursive: true });
-  }
-  fs.mkdirSync(extractDir, { recursive: true });
-  // Sparkle ZIP has non-standard structure — try multiple tools
-  let extracted = false;
-  for (const cmd of [
-    `7zz x -y -o"${extractDir}" "${zipPath}"`,
-    `7z x -y -o"${extractDir}" "${zipPath}"`,
-    `tar -xf "${zipPath}" -C "${extractDir}"`,
-    `unzip -o "${zipPath}" -d "${extractDir}"`,
-  ]) {
-    try {
-      execSync(cmd, { stdio: "pipe" });
-      extracted = true;
-      break;
-    } catch (e) {
-      // Check if files were extracted despite error (CRC warnings etc)
-      if (findFile(extractDir, "app.asar")) {
-        extracted = true;
-        break;
+    // 7zz for Windows MSIX and Linux (symlinks don't matter — only ASAR content used)
+    for (const bin of ["7zz", "7z"]) {
+      try {
+        execSync(`${bin} x -y -o"${dest}" "${archive}"`, { stdio: "pipe" });
+        return;
+      } catch {
+        if (fs.readdirSync(dest).length > 0) return;
       }
     }
+    throw new Error(`Failed to extract ${archive}`);
   }
-
-  // 找到 .app/Contents/Resources/app.asar
-  const appDir = findFile(extractDir, "app.asar");
-  if (!appDir) {
-    // Diagnostic: list what was extracted
-    try {
-      const contents = execSync(`ls -R "${extractDir}" | head -30`, { encoding: "utf-8" });
-      console.log("  [!] Extract dir contents:", contents);
-    } catch {}
-    throw new Error("macOS ZIP: app.asar not found after extraction");
-  }
-  console.log(`  📍 找到: ${path.relative(extractDir, appDir)}`);
-
-  // 提取 ASAR
-  const asarExtractDir = path.join(TEMP_DIR, "mac-asar");
-  if (fs.existsSync(asarExtractDir)) {
-    fs.rmSync(asarExtractDir, { recursive: true });
-  }
-  console.log("  📦 提取 ASAR...");
-  execSync(`npx asar extract "${appDir}" "${asarExtractDir}"`);
-
-  // 落盘到 src/upstream/unix/
-  console.log(`  💾 同步到 ${path.relative(PROJECT_ROOT, SRC_UNIX)}/`);
-  syncDirectory(asarExtractDir, SRC_UNIX);
-
-  return asarExtractDir;
 }
 
-// ─── Windows: MSIX 解包提取 ASAR ────────────────────────────────
-async function syncWin(winInfo) {
-  const msixPath = path.join(
-    TEMP_DIR,
-    winInfo.packageName || `Codex-win-${winInfo.version}.msix`
-  );
-  const extractDir = path.join(TEMP_DIR, "win-extract");
-
-  // 下载（MSIX 来自 MS CDN 的 HTTP 链接，用 curl 更可靠）
-  if (!fs.existsSync(msixPath)) {
-    console.log(`\n📥 下载 Windows MSIX: ${winInfo.version}`);
-    execSync(
-      `curl -L --retry 3 --retry-delay 2 -o "${msixPath}" "${winInfo.downloadUrl}"`,
-      { stdio: "inherit" }
-    );
-  } else {
-    console.log(`\n📦 使用缓存: ${msixPath}`);
-  }
-
-  // MSIX 是带 APPX 签名块的 ZIP，macOS 自带 unzip 不兼容，用 7zz
-  console.log("  📂 解压 MSIX...");
-  if (fs.existsSync(extractDir)) {
-    fs.rmSync(extractDir, { recursive: true });
-  }
-  fs.mkdirSync(extractDir, { recursive: true });
-  // MSIX is ZIP with APPX signature block. Try multiple tools.
-  let msixExtracted = false;
-  for (const cmd of [
-    `7zz x -y -o"${extractDir}" "${msixPath}"`,
-    `7z x -y -o"${extractDir}" "${msixPath}"`,
-    `tar -xf "${msixPath}" -C "${extractDir}"`,
-  ]) {
-    try {
-      execSync(cmd, { stdio: "pipe" });
-      msixExtracted = true;
-      break;
-    } catch (e) {
-      if (findFile(extractDir, "app.asar")) {
-        msixExtracted = true;
-        break;
-      }
-    }
-  }
-
-  // 在 MSIX 中找 app.asar
-  // MSIX 结构: app/resources/app.asar 或直接 resources/app.asar
-  const asarPath = findFile(extractDir, "app.asar");
-  if (!asarPath) {
-    // Diagnostic: list top-level contents (cross-platform)
-    try {
-      const entries = fs.readdirSync(extractDir);
-      console.log("  [!] MSIX extract contents:", entries.slice(0, 20).join(", "));
-    } catch {}
-    throw new Error("Windows MSIX: app.asar not found after extraction");
-  }
-  console.log(`  📍 找到: ${path.relative(extractDir, asarPath)}`);
-
-  // 提取 ASAR
-  const asarExtractDir = path.join(TEMP_DIR, "win-asar");
-  if (fs.existsSync(asarExtractDir)) {
-    fs.rmSync(asarExtractDir, { recursive: true });
-  }
-  console.log("  📦 提取 ASAR...");
-  execSync(`npx asar extract "${asarPath}" "${asarExtractDir}"`);
-
-  // 落盘到 src/upstream/win/
-  console.log(`  💾 同步到 ${path.relative(PROJECT_ROOT, SRC_WIN)}/`);
-  syncDirectory(asarExtractDir, SRC_WIN);
-
-  return asarExtractDir;
-}
-
-// ─── 目录同步（增量式） ──────────────────────────────────────────
-function syncDirectory(srcDir, destDir) {
-  // 清空目标后整体复制（保证一致性）
-  if (fs.existsSync(destDir)) {
-    fs.rmSync(destDir, { recursive: true });
-  }
-  fs.mkdirSync(destDir, { recursive: true });
-
-  // Native modules are rebuilt at build time — skip them, keep pure-JS deps
-  const NATIVE_MODULES = new Set(["better-sqlite3", "node-pty"]);
-
-  const copyRecursive = (src, dest, depth = 0, parentName = "") => {
-    const entries = fs.readdirSync(src, { withFileTypes: true });
-    for (const entry of entries) {
-      const srcPath = path.join(src, entry.name);
-      const destPath = path.join(dest, entry.name);
-
-      if (entry.isDirectory()) {
-        // Inside node_modules: skip native modules only
-        if (parentName === "node_modules" && NATIVE_MODULES.has(entry.name)) {
-          continue;
-        }
-        fs.mkdirSync(destPath, { recursive: true });
-        copyRecursive(srcPath, destPath, depth + 1, entry.name);
-      } else {
-        fs.copyFileSync(srcPath, destPath);
-      }
-    }
-  };
-
-  copyRecursive(srcDir, destDir);
-
-  // 统计
-  let fileCount = 0;
-  const countFiles = (dir) => {
-    for (const e of fs.readdirSync(dir, { withFileTypes: true })) {
-      if (e.isDirectory()) countFiles(path.join(dir, e.name));
-      else fileCount++;
-    }
-  };
-  countFiles(destDir);
-  console.log(`    📊 ${fileCount} 个文件`);
-}
-
-// ─── 辅助 ────────────────────────────────────────────────────────
 function findFile(dir, name) {
-  const entries = fs.readdirSync(dir, { withFileTypes: true });
-  for (const e of entries) {
+  for (const e of fs.readdirSync(dir, { withFileTypes: true })) {
     const full = path.join(dir, e.name);
     if (e.isFile() && e.name === name) return full;
-    if (e.isDirectory()) {
-      const found = findFile(full, name);
-      if (found) return found;
-    }
+    if (e.isDirectory()) { const r = findFile(full, name); if (r) return r; }
   }
   return null;
 }
 
-function formatSize(bytes) {
-  if (!bytes) return "0 B";
-  if (bytes < 1024) return bytes + " B";
-  if (bytes < 1024 * 1024) return (bytes / 1024).toFixed(1) + " KB";
-  if (bytes < 1024 * 1024 * 1024)
-    return (bytes / (1024 * 1024)).toFixed(1) + " MB";
-  return (bytes / (1024 * 1024 * 1024)).toFixed(2) + " GB";
+function copyRecursive(src, dest) {
+  fs.mkdirSync(dest, { recursive: true });
+  let count = 0;
+  for (const e of fs.readdirSync(src, { withFileTypes: true })) {
+    const s = path.join(src, e.name), d = path.join(dest, e.name);
+    if (e.isDirectory()) { count += copyRecursive(s, d); }
+    else if (e.isSymbolicLink()) { /* skip */ }
+    else { fs.copyFileSync(s, d); count++; }
+  }
+  return count;
 }
 
-// ─── 主流程 ──────────────────────────────────────────────────────
-async function main() {
-  console.log("🔄 Codex 上游资源同步\n");
+function clearDir(dir) {
+  if (fs.existsSync(dir)) fs.rmSync(dir, { recursive: true });
+  fs.mkdirSync(dir, { recursive: true });
+}
 
-  // 确保临时目录
+function countFiles(dir) {
+  let n = 0;
+  for (const e of fs.readdirSync(dir, { withFileTypes: true })) {
+    if (e.isDirectory()) n += countFiles(path.join(dir, e.name));
+    else n++;
+  }
+  return n;
+}
+
+// ─── Version detection ──────────────────────────────────────────
+
+async function getAppcastVersion(url) {
+  const { XMLParser } = require("fast-xml-parser");
+  const res = await httpGet(url);
+  if (res.status !== 200) throw new Error(`Appcast fetch failed: ${res.status}`);
+  const parser = new XMLParser({ ignoreAttributes: false, attributeNamePrefix: "@_", removeNSPrefix: true });
+  const parsed = parser.parse(res.body.toString());
+  const items = parsed.rss?.channel?.item;
+  const latest = Array.isArray(items) ? items[0] : items;
+  let enc = latest.enclosure;
+  if (Array.isArray(enc)) enc = enc[0];
+  return {
+    version: latest.shortVersionString || latest.title,
+    build: String(latest.version || ""),
+    url: enc?.["@_url"] || "",
+  };
+}
+
+async function getWindowsVersion() {
+  const msstore = require("./fetch-msstore");
+  const cookie = await msstore.getCookie();
+  const info = await msstore.getAppInfo("9plm9xgg6vks", "US");
+  if (!info.categoryId) throw new Error("No CategoryID");
+  const pkgs = await msstore.getFileList(cookie, info.categoryId, "Retail");
+  if (pkgs.length === 0) throw new Error("No packages");
+  const pkg = pkgs[0];
+  const url = await msstore.getDownloadUrl(pkg.updateID, pkg.revisionNumber, "Retail", pkg.digest);
+  const verMatch = pkg.name.match(/_(\d+\.\d+\.\d+(?:\.\d+)?)_/);
+  return { version: verMatch?.[1] || "unknown", url, packageName: pkg.name };
+}
+
+// ─── Extract macOS ──────────────────────────────────────────────
+
+async function syncMac(variant, appcastUrl, destDir) {
+  const label = `macOS-${variant}`;
+  console.log(`\n-- ${label}`);
+
+  const info = await getAppcastVersion(appcastUrl);
+  console.log(`   version: ${info.version} (build ${info.build})`);
+
+  const zipPath = path.join(TEMP_DIR, `Codex-${variant}-${info.version}.zip`);
+  const extractDir = path.join(TEMP_DIR, `${variant}-extract`);
+
+  if (!fs.existsSync(zipPath)) {
+    curlDownload(info.url, zipPath, label);
+  } else {
+    console.log(`   [cache] ${zipPath}`);
+  }
+
+  console.log("   [unzip]");
+  clearDir(extractDir);
+  extractArchive(zipPath, extractDir);
+
+  const resourcesDir = findResourcesDir(extractDir);
+  if (!resourcesDir) throw new Error(`${label}: Resources directory not found`);
+
+  assembleOutput(resourcesDir, destDir, label);
+  return info;
+}
+
+// ─── Extract Windows ────────────────────────────────────────────
+
+async function syncWin(destDir) {
+  console.log("\n-- Windows");
+
+  const info = await getWindowsVersion();
+  console.log(`   version: ${info.version}`);
+
+  const msixPath = path.join(TEMP_DIR, info.packageName || `codex-win-${info.version}.msix`);
+  const extractDir = path.join(TEMP_DIR, "win-extract");
+
+  if (!fs.existsSync(msixPath)) {
+    curlDownload(info.url, msixPath, "Windows MSIX");
+  } else {
+    console.log(`   [cache] ${msixPath}`);
+  }
+
+  console.log("   [unzip]");
+  clearDir(extractDir);
+  extractArchive(msixPath, extractDir);
+
+  const resourcesDir = path.join(extractDir, "app", "resources");
+  if (!fs.existsSync(resourcesDir)) {
+    const alt = findFile(extractDir, "app.asar");
+    throw new Error(`Windows: resources dir not found${alt ? `, app.asar at ${alt}` : ""}`);
+  }
+
+  assembleOutput(resourcesDir, destDir, "Windows");
+  return info;
+}
+
+// ─── Assemble output ────────────────────────────────────────────
+
+function assembleOutput(resourcesDir, destDir, label) {
+  const asarPath = path.join(resourcesDir, "app.asar");
+  if (!fs.existsSync(asarPath)) throw new Error(`${label}: app.asar not found`);
+
+  console.log(`   [assemble] -> ${path.relative(PROJECT_ROOT, destDir)}/`);
+  clearDir(destDir);
+
+  // 1. Extract app.asar → _asar/ (for patching)
+  const asarDest = path.join(destDir, "_asar");
+  console.log("   [asar extract] -> _asar/");
+  execSync(`npx asar extract "${asarPath}" "${asarDest}"`);
+
+  // 2. Copy app.asar.unpacked/ as-is (native modules)
+  const unpackedSrc = path.join(resourcesDir, "app.asar.unpacked");
+  if (fs.existsSync(unpackedSrc)) {
+    const n = copyRecursive(unpackedSrc, path.join(destDir, "app.asar.unpacked"));
+    console.log(`   [copy] app.asar.unpacked/ (${n} files)`);
+  }
+
+  // 3. Copy all other resources (binaries, plugins, native, etc.)
+  let extraCount = 0;
+  for (const e of fs.readdirSync(resourcesDir, { withFileTypes: true })) {
+    if (e.name === "app.asar" || e.name === "app.asar.unpacked") continue;
+    if (e.name.endsWith(".lproj")) continue;
+    const s = path.join(resourcesDir, e.name);
+    const d = path.join(destDir, e.name);
+    if (e.isDirectory()) { extraCount += copyRecursive(s, d); }
+    else if (!e.isSymbolicLink()) { fs.copyFileSync(s, d); extraCount++; }
+  }
+  console.log(`   [copy] ${extraCount} extra resource files`);
+
+  const total = countFiles(destDir);
+  console.log(`   [ok] ${total} files total`);
+}
+
+function findResourcesDir(extractDir) {
+  const appDir = findFile(extractDir, "app.asar");
+  return appDir ? path.dirname(appDir) : null;
+}
+
+// ─── Version state ──────────────────────────────────────────────
+
+function loadVersions() {
+  try { return JSON.parse(fs.readFileSync(VERSION_FILE, "utf-8")); } catch { return {}; }
+}
+function saveVersions(v) {
+  fs.writeFileSync(VERSION_FILE, JSON.stringify(v, null, 2) + "\n");
+}
+
+// ─── Main ───────────────────────────────────────────────────────
+
+async function main() {
+  console.log("== Codex upstream sync ==\n");
   fs.mkdirSync(TEMP_DIR, { recursive: true });
 
-  // 1. 检测版本
-  console.log("📡 检测最新版本...");
-  const [macResult, winResult] = await Promise.allSettled([
-    SKIP_MAC ? Promise.reject(new Error("skipped")) : checkMacVersion(),
-    SKIP_WIN ? Promise.reject(new Error("skipped")) : checkWindowsVersion(),
-  ]);
+  const results = {};
 
-  const macInfo =
-    macResult.status === "fulfilled" ? macResult.value : null;
-  const winInfo =
-    winResult.status === "fulfilled" ? winResult.value : null;
+  // Detect versions
+  if (!SKIP_MAC) {
+    try {
+      const arm64Info = await getAppcastVersion(APPCAST_ARM64);
+      console.log(`\n   mac-arm64: ${arm64Info.version} (build ${arm64Info.build})`);
+      results["mac-arm64"] = arm64Info;
+    } catch (e) { console.error(`   [x] mac-arm64 check: ${e.message}`); }
 
-  if (macInfo) {
-    console.log(
-      `  macOS:   ${macInfo.version} (build ${macInfo.build})`
-    );
-  } else if (!SKIP_MAC) {
-    console.error(`  ⚠️  macOS 检测失败: ${macResult.reason.message}`);
+    try {
+      const x64Info = await getAppcastVersion(APPCAST_X64);
+      console.log(`   mac-x64:   ${x64Info.version} (build ${x64Info.build})`);
+      results["mac-x64"] = x64Info;
+    } catch (e) { console.error(`   [x] mac-x64 check: ${e.message}`); }
   }
 
-  if (winInfo) {
-    console.log(`  Windows: ${winInfo.version}`);
-  } else if (!SKIP_WIN) {
-    console.error(`  ⚠️  Windows 检测失败: ${winResult.reason.message}`);
-  }
-
-  // 2. 检查是否需要更新
-  const saved = loadVersions();
-  const needMac =
-    macInfo &&
-    (FORCE ||
-      !saved.macOS ||
-      saved.macOS.version !== macInfo.version ||
-      saved.macOS.build !== macInfo.build);
-  const needWin =
-    winInfo &&
-    (FORCE || !saved.Windows || saved.Windows.version !== winInfo.version);
-
-  if (!needMac && !needWin) {
-    console.log("\n✅ 所有平台均为最新，无需同步。");
-    if (!FORCE) return;
+  if (!SKIP_WIN) {
+    try {
+      const winInfo = await getWindowsVersion();
+      console.log(`   win:       ${winInfo.version}`);
+      results.win = winInfo;
+    } catch (e) { console.error(`   [x] win check: ${e.message}`); }
   }
 
   if (CHECK_ONLY) {
-    if (needMac) console.log(`\n🆕 macOS 需要更新: ${macInfo.version}`);
-    if (needWin) console.log(`\n🆕 Windows 需要更新: ${winInfo.version}`);
+    console.log("\n== Check only, skipping download ==");
     return;
   }
 
-  // 3. 下载并解包
-  if (needMac) {
-    await syncMac(macInfo);
+  // Download and extract
+  if (!SKIP_MAC && results["mac-arm64"]) {
+    try {
+      results["mac-arm64"] = await syncMac("arm64", APPCAST_ARM64, path.join(SRC_DIR, "mac-arm64"));
+    } catch (e) { console.error(`   [x] mac-arm64: ${e.message}`); }
+  }
+  if (!SKIP_MAC && results["mac-x64"]) {
+    try {
+      results["mac-x64"] = await syncMac("x64", APPCAST_X64, path.join(SRC_DIR, "mac-x64"));
+    } catch (e) { console.error(`   [x] mac-x64: ${e.message}`); }
+  }
+  if (!SKIP_WIN && results.win) {
+    try {
+      results.win = await syncWin(path.join(SRC_DIR, "win"));
+    } catch (e) { console.error(`   [x] win: ${e.message}`); }
   }
 
-  if (needWin) {
-    await syncWin(winInfo);
+  const saved = loadVersions();
+  for (const [key, info] of Object.entries(results)) {
+    saved[key] = { version: info.version, build: info.build || "", checkedAt: new Date().toISOString() };
   }
+  saveVersions(saved);
 
-  // 4. 保存版本记录
-  const newSaved = { ...saved };
-  if (needMac && macInfo) {
-    newSaved.macOS = {
-      version: macInfo.version,
-      build: macInfo.build,
-      checkedAt: new Date().toISOString(),
-    };
+  console.log("\n== Done ==");
+  for (const [key, info] of Object.entries(results)) {
+    console.log(`   ${key}: ${info.version}`);
   }
-  if (needWin && winInfo) {
-    newSaved.Windows = {
-      version: winInfo.version,
-      checkedAt: new Date().toISOString(),
-    };
-  }
-  saveVersions(newSaved);
-
-  console.log(`\n✅ 同步完成`);
-  console.log(`   Unix 资源: src/unix/`);
-  console.log(`   Win  资源: src/win/`);
-  console.log(`\n💡 下一步: 运行 patch 脚本处理 upstream 资源，然后构建`);
 }
 
-main().catch((e) => {
-  console.error(`\n❌ 错误: ${e.message}`);
-  if (e.stack) console.error(e.stack);
-  process.exit(1);
-});
+main().catch((e) => { console.error(`\n[x] ${e.message}`); process.exit(1); });

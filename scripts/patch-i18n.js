@@ -1,130 +1,159 @@
 /**
- * Post-build patch: Force-enable i18n multi-language support
+ * Post-build patch: Force-enable i18n by bypassing Statsig cloud control
  *
- * Codex i18n is gated behind Statsig cloud config 72216192, field "enable_i18n".
- * Default value is false, which causes:
- *   - Language selector not rendered
- *   - Locale messages not loaded
- *   - Language switching has no effect
+ * Codex i18n is gated behind Statsig layer 72216192, field "enable_i18n".
+ * Even though the default value changed to true in v26.422+, the Statsig
+ * server can still push enable_i18n=false to override it.
  *
- * This patch replaces all `r?.get("enable_i18n", !1)` with `r?.get("enable_i18n", !0)`,
- * forcing i18n to be enabled by default, independent of Statsig cloud control.
+ * This patch uses AST to find all .get("enable_i18n", ...) call expressions
+ * within the 72216192 layer context, and replaces the entire ChainExpression
+ * or CallExpression with !0, completely bypassing Statsig control.
  *
- * Match strategy (exact string match + context validation):
- *   - Search: .get(`enable_i18n`,!1)
- *   - Replace: .get(`enable_i18n`,!0)
- *   - Validate: Statsig config ID 72216192 must exist within +/-500 chars
+ * Target files: index-*.js, general-settings-*.js (varies across versions)
  *
  * Usage:
- *   node scripts/patch-i18n.js [platform]     # Apply patch (unix/win/omit=both)
- *   node scripts/patch-i18n.js --check        # Dry-run: report matches without modifying
+ *   node scripts/patch-i18n.js [platform]   # Apply (mac-arm64/mac-x64/win/omit=all)
+ *   node scripts/patch-i18n.js --check      # Dry-run
  */
 const fs = require("fs");
 const path = require("path");
+const { parse } = require("acorn");
+const { locateBundles, relPath, SRC_DIR } = require("./patch-util");
 
 // ──────────────────────────────────────────────
-//  Bundle location (multi-platform support)
+//  AST walker
 // ──────────────────────────────────────────────
 
-const SRC_DIR = path.join(__dirname, "..", "src");
-
-function locateBundles(platform) {
-  const platforms = platform
-    ? [platform]
-    : ["unix", "win"].filter((p) =>
-        fs.existsSync(path.join(SRC_DIR, p, "webview", "assets"))
-      );
-
-  // Fallback: legacy flat structure src/webview/assets/
-  if (platforms.length === 0) {
-    const fallback = path.join(SRC_DIR, "webview", "assets");
-    if (fs.existsSync(fallback)) {
-      const files = fs
-        .readdirSync(fallback)
-        .filter((f) => /^index-.*\.js$/.test(f));
-      if (files.length === 1)
-        return [{ platform: "legacy", path: path.join(fallback, files[0]) }];
+function walk(node, visitor) {
+  if (!node || typeof node !== "object") return;
+  if (node.type) visitor(node);
+  for (const key of Object.keys(node)) {
+    const child = node[key];
+    if (Array.isArray(child)) {
+      for (const item of child) {
+        if (item && typeof item === "object" && item.type) walk(item, visitor);
+      }
+    } else if (child && typeof child === "object" && child.type) {
+      walk(child, visitor);
     }
-    console.error("[x] No index-*.js bundle found");
-    process.exit(1);
   }
-
-  const results = [];
-  for (const plat of platforms) {
-    const assetsDir = path.join(SRC_DIR, plat, "webview", "assets");
-    if (!fs.existsSync(assetsDir)) continue;
-
-    const files = fs
-      .readdirSync(assetsDir)
-      .filter((f) => /^index-.*\.js$/.test(f));
-
-    if (files.length === 0) {
-      console.warn(`  [!] ${plat}: no index-*.js found`);
-      continue;
-    }
-    if (files.length > 1) {
-      console.warn(
-        `  [!] ${plat}: multiple index-*.js found: ${files.join(", ")}`
-      );
-      continue;
-    }
-
-    results.push({ platform: plat, path: path.join(assetsDir, files[0]) });
-  }
-
-  return results;
 }
 
 // ──────────────────────────────────────────────
-//  Patch logic
+//  AST matching
 // ──────────────────────────────────────────────
 
-// Exact match targets (backtick, single-quote, double-quote variants)
-const SEARCH_PATTERNS = [
-  { find: ".get(`enable_i18n`,!1)", replace: ".get(`enable_i18n`,!0)" },
-  { find: ".get('enable_i18n',!1)", replace: ".get('enable_i18n',!0)" },
-  { find: '.get("enable_i18n",!1)', replace: '.get("enable_i18n",!0)' },
-];
+const LAYER_ID = "72216192";
+const FIELD_NAME = "enable_i18n";
 
-// Context validation: Statsig config ID 72216192 must appear nearby
-const CONTEXT_MARKER = "72216192";
-const CONTEXT_RANGE = 500;
+/**
+ * Find CallExpression (possibly wrapped in ChainExpression):
+ *   X?.get("enable_i18n", <default>)
+ *   X.get("enable_i18n", <default>)
+ *
+ * Where the containing function also references LAYER_ID "72216192".
+ *
+ * Replace the outermost expression (ChainExpression or CallExpression) with !0.
+ */
+function collectPatches(ast, source) {
+  const patches = [];
+  const seen = new Set();
 
-function patchSource(source, filePath, isCheck) {
-  let code = source;
-  let totalPatches = 0;
+  walk(ast, (node) => {
+    let callNode = null;
+    let replaceNode = null;
 
-  for (const pattern of SEARCH_PATTERNS) {
-    let idx = code.indexOf(pattern.find);
-    while (idx !== -1) {
-      // Context validation
-      const contextStart = Math.max(0, idx - CONTEXT_RANGE);
-      const contextEnd = Math.min(code.length, idx + CONTEXT_RANGE);
-      const context = code.slice(contextStart, contextEnd);
+    // Match ChainExpression wrapping a CallExpression
+    if (node.type === "ChainExpression" && node.expression?.type === "CallExpression") {
+      callNode = node.expression;
+      replaceNode = node;
+    } else if (node.type === "CallExpression") {
+      callNode = node;
+      replaceNode = node;
+    }
 
-      if (context.includes(CONTEXT_MARKER)) {
-        totalPatches++;
-        if (isCheck) {
-          console.log(`  > offset ${idx}`);
-          console.log(
-            `    context: ...${code.slice(Math.max(0, idx - 40), idx + pattern.find.length + 20)}...`
-          );
-        } else {
-          code =
-            code.slice(0, idx) +
-            pattern.replace +
-            code.slice(idx + pattern.find.length);
-          console.log(
-            `  * offset ${idx}: enable_i18n default !1 -> !0`
-          );
-        }
+    if (!callNode) return;
+
+    // Callee must be MemberExpression with property "get"
+    const callee = callNode.callee;
+    if (!callee || callee.type !== "MemberExpression") return;
+    const prop = callee.property;
+    if (!prop) return;
+    const propName = prop.type === "Identifier" ? prop.name
+      : prop.type === "Literal" ? prop.value : null;
+    if (propName !== "get") return;
+
+    // First argument must be string literal "enable_i18n"
+    const args = callNode.arguments;
+    if (!args || args.length < 2) return;
+    const firstArg = args[0];
+    const argValue = firstArg.type === "Literal" ? firstArg.value
+      : (firstArg.type === "TemplateLiteral" && firstArg.expressions.length === 0
+        && firstArg.quasis.length === 1) ? firstArg.quasis[0].value.cooked
+      : null;
+    if (argValue !== FIELD_NAME) return;
+
+    // Context validation: LAYER_ID must appear nearby (within 500 chars)
+    const start = Math.max(0, replaceNode.start - 500);
+    const end = Math.min(source.length, replaceNode.end + 200);
+    const context = source.slice(start, end);
+    if (!context.includes(LAYER_ID)) return;
+
+    // Already patched?
+    const exprSrc = source.slice(replaceNode.start, replaceNode.end);
+    if (exprSrc === "!0") return;
+
+    // Dedup
+    if (seen.has(replaceNode.start)) return;
+    seen.add(replaceNode.start);
+
+    patches.push({
+      start: replaceNode.start,
+      end: replaceNode.end,
+      replacement: "!0",
+      original: exprSrc,
+    });
+  });
+
+  return patches;
+}
+
+// ──────────────────────────────────────────────
+//  Bundle location: scan all JS chunks for enable_i18n + 72216192
+// ──────────────────────────────────────────────
+
+function locateTargets(platform) {
+  const platforms = platform
+    ? [platform]
+    : ["mac-arm64", "mac-x64", "win"].filter((p) =>
+        fs.existsSync(path.join(SRC_DIR, p, "_asar", "webview", "assets"))
+      );
+
+  const targets = [];
+  for (const plat of platforms) {
+    // Check index-*.js
+    const indexBundles = locateBundles({ dir: "assets", pattern: /^index-.*\.js$/, platform: plat });
+    for (const b of indexBundles) {
+      const src = fs.readFileSync(b.path, "utf-8");
+      if (src.includes(FIELD_NAME) && src.includes(LAYER_ID)) {
+        targets.push(b);
       }
+    }
 
-      idx = code.indexOf(pattern.find, idx + 1);
+    // Check general-settings-*.js and other small chunks
+    const assetsDir = path.join(SRC_DIR, plat, "_asar", "webview", "assets");
+    if (!fs.existsSync(assetsDir)) continue;
+    for (const f of fs.readdirSync(assetsDir)) {
+      if (!f.endsWith(".js") || f.startsWith("index-")) continue;
+      const fp = path.join(assetsDir, f);
+      const src = fs.readFileSync(fp, "utf-8");
+      if (src.includes(FIELD_NAME) && src.includes(LAYER_ID)) {
+        targets.push({ platform: plat, path: fp });
+      }
     }
   }
 
-  return { code, patchCount: totalPatches };
+  return targets;
 }
 
 // ──────────────────────────────────────────────
@@ -134,62 +163,55 @@ function patchSource(source, filePath, isCheck) {
 function main() {
   const args = process.argv.slice(2);
   const isCheck = args.includes("--check");
-  const platform = args.find((a) => a === "unix" || a === "win");
+  const platform = args.find((a) => ["mac-arm64", "mac-x64", "win"].includes(a));
 
-  const bundles = locateBundles(platform);
-  if (bundles.length === 0) {
-    console.error("[x] No patchable bundles found");
-    process.exit(1);
+  const targets = locateTargets(platform);
+
+  if (targets.length === 0) {
+    console.log("[ok] No files contain enable_i18n + layer 72216192 (upstream may have removed gate)");
+    return;
   }
 
   let grandTotal = 0;
 
-  for (const bundle of bundles) {
-    const relPath = path.relative(path.join(__dirname, ".."), bundle.path);
-    console.log(`\n-- [${bundle.platform}] ${relPath}`);
-
+  for (const bundle of targets) {
+    console.log(`\n-- [${bundle.platform}] ${relPath(bundle.path)}`);
     const source = fs.readFileSync(bundle.path, "utf-8");
-    console.log(
-      `   size: ${(source.length / 1024 / 1024).toFixed(1)} MB`
-    );
+    console.log(`   size: ${(source.length / 1024 / 1024).toFixed(1)} MB`);
 
-    // Idempotency check
-    const alreadyPatched = SEARCH_PATTERNS.every(
-      (p) => !source.includes(p.find)
-    );
-    if (alreadyPatched) {
-      const hasEnabled = SEARCH_PATTERNS.some((p) =>
-        source.includes(p.replace)
-      );
-      if (hasEnabled) {
-        console.log(
-          "   [ok] Already enabled (previously patched or upstream changed)"
-        );
-      } else {
-        console.log(
-          "   [!] enable_i18n pattern not found (code structure may have changed)"
-        );
+    const t0 = Date.now();
+    const ast = parse(source, { ecmaVersion: "latest", sourceType: "module" });
+    console.log(`   parse: ${Date.now() - t0}ms`);
+
+    const patches = collectPatches(ast, source);
+    grandTotal += patches.length;
+
+    if (patches.length === 0) {
+      console.log("   [ok] enable_i18n already bypassed or no AST match");
+      continue;
+    }
+
+    if (isCheck) {
+      console.log(`   [?] Matches: ${patches.length}`);
+      for (const p of patches) {
+        console.log(`     > offset ${p.start}: ${p.original.slice(0, 60)} -> !0`);
       }
       continue;
     }
 
-    const { code, patchCount } = patchSource(source, bundle.path, isCheck);
-    grandTotal += patchCount;
+    patches.sort((a, b) => b.start - a.start);
 
-    if (isCheck) {
-      console.log(`   [?] Matches: ${patchCount}`);
-      continue;
+    let code = source;
+    for (const p of patches) {
+      console.log(`   * offset ${p.start}: ${p.original.slice(0, 60)} -> !0`);
+      code = code.slice(0, p.start) + p.replacement + code.slice(p.end);
     }
 
-    if (patchCount > 0) {
-      fs.writeFileSync(bundle.path, code, "utf-8");
-      console.log(`   [ok] i18n force-enabled: ${patchCount} replacements`);
-    } else {
-      console.log("   [!] No matches");
-    }
+    fs.writeFileSync(bundle.path, code, "utf-8");
+    console.log(`   [ok] i18n gate bypassed: ${patches.length} replacements`);
   }
 
-  if (isCheck) {
+  if (isCheck && grandTotal > 0) {
     console.log(`\n=> Total: ${grandTotal} patchable locations`);
   }
 }

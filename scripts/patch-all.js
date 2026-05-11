@@ -15,15 +15,14 @@ const PATCHES = [
   "patch-i18n.js",
   "patch-copyright.js",
   "patch-devtools.js",
-  "patch-sunset.js",
   "patch-fast-mode.js",
-  "patch-connections.js",
-  "patch-statsig-logger.js",
+  "patch-plugin-auth.js",
+  "patch-gpu.js",
 ];
 
 function main() {
   const args = process.argv.slice(2);
-  const platform = args.find((a) => a === "unix" || a === "win");
+  const platform = args.find((a) => ["mac-arm64", "mac-x64", "win", "unix"].includes(a));
   const extra = args.filter((a) => a.startsWith("--"));
   const passArgs = [...(platform ? [platform] : []), ...extra];
 
