@@ -1,21 +1,19 @@
 #!/usr/bin/env node
 /**
- * Post-build patch: Force-enable Fast mode (speed selector)
+ * Post-build patch: force-enable Fast mode (speed selector).
  *
- * The speed selector is gated by authMethod === "chatgpt" checks.
- * API-key users never see it because their authMethod differs.
+ * Different Codex desktop versions have used different gates:
+ *   - statsig_default_enable_features.fast_mode
+ *   - authMethod !== "chatgpt" checks
+ *   - model metadata / featureRequirements checks
  *
- * This patch locates BinaryExpression nodes matching:
- *   X.authMethod !== "chatgpt"
- * inside functions that also reference "fast_mode", and replaces
- * the comparison with !1 (always false), removing the auth gate.
- *
- * Target: permissions-mode-helpers-*.js (or any chunk with the pattern)
+ * This patch scans the platform webview chunks and removes all known Fast mode
+ * gates while keeping the matching AST patterns narrow.
  */
 const fs = require("fs");
 const path = require("path");
 const { parse } = require("acorn");
-const { locateBundles, relPath, SRC_DIR } = require("./patch-util");
+const { relPath, SRC_DIR } = require("./patch-util");
 
 function walk(node, visitor) {
   if (!node || typeof node !== "object") return;
@@ -33,39 +31,113 @@ function walk(node, visitor) {
   }
 }
 
+const FEATURE_STORE_KEY = "statsig_default_enable_features";
+const FAST_MODE_KEY = "fast_mode";
+const SPEED_TIER_KEY = "additionalSpeedTiers";
+const FEATURE_REQUIREMENTS_KEY = "featureRequirements";
+
+function pushPatch(patches, patch) {
+  if (patches.some((p) => p.start === patch.start)) return;
+  patches.push(patch);
+}
+
+function replaceFunctionBodyWithTrue(node, source, patches, id) {
+  if (node.body?.type !== "BlockStatement") return false;
+
+  const bodySrc = source.slice(node.body.start + 1, node.body.end - 1).trim();
+  if (bodySrc === "return!0") return true;
+
+  pushPatch(patches, {
+    id,
+    start: node.body.start + 1,
+    end: node.body.end - 1,
+    replacement: "return!0",
+    original: bodySrc,
+  });
+  return true;
+}
+
 function collectPatches(ast, source) {
   const patches = [];
 
   walk(ast, (node) => {
-    // Match function bodies containing both authMethod and fast_mode
     const isFn =
       node.type === "FunctionDeclaration" ||
       node.type === "FunctionExpression" ||
       node.type === "ArrowFunctionExpression";
     if (!isFn) return;
 
-    const fnSrc = source.slice(node.start, node.end);
-    if (!fnSrc.includes("authMethod") || !fnSrc.includes("fast_mode")) return;
+    const funcSrc = source.slice(node.start, node.end);
 
-    // Inside this function, find: X.authMethod !== `chatgpt`
+    if (
+      funcSrc.includes(SPEED_TIER_KEY) &&
+      funcSrc.includes(".includes(") &&
+      replaceFunctionBodyWithTrue(node, source, patches, "fast_tier_model_check")
+    ) {
+      return;
+    }
+
+    if (
+      funcSrc.includes(FEATURE_REQUIREMENTS_KEY) &&
+      funcSrc.includes(FAST_MODE_KEY) &&
+      funcSrc.includes("chatgpt") &&
+      replaceFunctionBodyWithTrue(node, source, patches, "fast_mode_requirements_check")
+    ) {
+      return;
+    }
+
+    if (
+      !funcSrc.includes(FAST_MODE_KEY) ||
+      (!funcSrc.includes("authMethod") && !funcSrc.includes(FEATURE_STORE_KEY))
+    ) {
+      return;
+    }
+
     walk(node, (child) => {
-      if (child.type !== "BinaryExpression" || child.operator !== "!==") return;
+      if (child.type === "BinaryExpression" && child.operator === "!==") {
+        const childSrc = source.slice(child.start, child.end);
+        if (!childSrc.includes("authMethod") || !childSrc.includes("chatgpt")) return;
+        if (childSrc === "!1") return;
 
-      const childSrc = source.slice(child.start, child.end);
-      if (!childSrc.includes("authMethod") || !childSrc.includes("chatgpt"))
+        pushPatch(patches, {
+          id: "fast_mode_auth_gate",
+          start: child.start,
+          end: child.end,
+          replacement: "!1",
+          original: childSrc,
+        });
         return;
+      }
 
-      if (childSrc === "!1") return;
+      if (child.type !== "LogicalExpression" || child.operator !== "&&") return;
 
-      // Avoid duplicate patches at same offset
-      if (patches.some((p) => p.start === child.start)) return;
+      const left = child.left;
+      const right = child.right;
+      if (!left || left.type !== "BinaryExpression" || left.operator !== "===") return;
 
-      patches.push({
-        id: "fast_mode_auth_gate",
+      const lr = left.right;
+      if (
+        !lr ||
+        lr.type !== "UnaryExpression" ||
+        lr.operator !== "!" ||
+        lr.argument?.value !== 0
+      ) {
+        return;
+      }
+
+      const leftSrc = source.slice(left.left.start, left.left.end);
+      if (!leftSrc.includes(FAST_MODE_KEY)) return;
+      if (!right || right.type !== "CallExpression" || right.arguments.length !== 1) return;
+
+      const exprSrc = source.slice(child.start, child.end);
+      if (exprSrc === "!0") return;
+
+      pushPatch(patches, {
+        id: "fast_mode_statsig_gate",
         start: child.start,
         end: child.end,
-        replacement: "!1",
-        original: childSrc,
+        replacement: "!0",
+        original: exprSrc,
       });
     });
   });
@@ -94,7 +166,11 @@ function main() {
       if (!f.endsWith(".js")) continue;
       const fp = path.join(assetsDir, f);
       const src = fs.readFileSync(fp, "utf-8");
-      if (src.includes("authMethod") && src.includes("fast_mode")) {
+      const hasAuthGate = src.includes("authMethod") && src.includes(FAST_MODE_KEY);
+      const hasLegacyGate = src.includes(FEATURE_STORE_KEY) && src.includes(FAST_MODE_KEY);
+      const hasMetadataGate =
+        src.includes(SPEED_TIER_KEY) && src.includes(FEATURE_REQUIREMENTS_KEY);
+      if (hasAuthGate || hasLegacyGate || hasMetadataGate) {
         targets.push({ platform: plat, path: fp });
       }
     }
@@ -119,7 +195,6 @@ function main() {
     }
 
     const patches = collectPatches(ast, source);
-
     if (patches.length === 0) continue;
 
     console.log(
@@ -128,7 +203,7 @@ function main() {
 
     if (isCheck) {
       for (const p of patches) {
-        console.log(`    [?] offset ${p.start}: ${p.original} -> ${p.replacement}`);
+        console.log(`    [?] ${p.id} offset ${p.start}: ${p.original} -> ${p.replacement}`);
       }
       continue;
     }
@@ -137,7 +212,7 @@ function main() {
 
     let code = source;
     for (const p of patches) {
-      console.log(`    * ${p.original} -> ${p.replacement}`);
+      console.log(`    * ${p.id}: ${p.original} -> ${p.replacement}`);
       code = code.slice(0, p.start) + p.replacement + code.slice(p.end);
     }
 
@@ -146,9 +221,9 @@ function main() {
   }
 
   if (totalPatched > 0) {
-    console.log(`  [ok] ${totalPatched} auth gate(s) removed`);
+    console.log(`  [ok] ${totalPatched} fast-mode gate(s) patched`);
   } else {
-    console.log("  [ok] fast_mode auth gates already patched or absent");
+    console.log("  [ok] fast_mode gates already patched or absent");
   }
 }
 
